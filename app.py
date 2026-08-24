@@ -2,6 +2,10 @@ import os
 os.environ['NO_PROXY'] = '*'
 
 import streamlit as st
+
+# 🚨 CRITICAL FIX: set_page_config MUST be the very first Streamlit command executed!
+st.set_page_config(page_title="Textbook Index Extractor", layout="wide")
+
 import pdfplumber
 import pandas as pd
 import json
@@ -14,7 +18,6 @@ from openai import OpenAI
 import httpx
 
 # --- 1. CONFIGURATION & AUTHENTICATION ---
-# --- 1. CONFIGURATION & AUTHENTICATION ---
 load_dotenv()
 
 # Safely pull keys from Streamlit Secrets (Cloud) or fallback to local .env
@@ -25,6 +28,7 @@ try:
 except Exception:
     # Safely ignored for local runs where secrets.toml doesn't exist
     pass
+
 # Initialize OpenAI Client (Bypassing Windows/Cloud Proxies)
 if OPENAI_API_KEY:
     try:
@@ -36,7 +40,7 @@ if OPENAI_API_KEY:
         )
     except Exception as e:
         openai_client = None
-        print(f"OpenAI Initialization Error: {e}")
+        st.error(f"OpenAI Initialization Error: {e}")
 else:
     openai_client = None
 
@@ -141,7 +145,6 @@ def process_text_with_ai(raw_text, filename, max_retries=3):
                 return []
 
 # --- 3. STREAMLIT UI & MAIN PIPELINE ---
-st.set_page_config(page_title="Textbook Index Extractor", layout="wide")
 st.title("📚 Textbook Index Extractor")
 st.markdown("Automated curriculum text parser mapped directly to structured Excel sheets.")
 
