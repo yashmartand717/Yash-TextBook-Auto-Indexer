@@ -1,0 +1,23 @@
+# --- SENSITIVE CREDS & ENVIRONMENT ---
+.env
+gcp_credentials.json
+
+# --- LOCAL FOLDERS & TEMP ASSETS ---
+temp_icons/
+temp icons 2/
+extracted_pngs/
+icon automation/
+science 6th/
+maths class 6th/
+maths class12th/
+drive-download-*/**
+__pycache__/
+.DS_Store
+
+# --- DOCUMENTS, SPREADSHEETS & MEDIA ---
+*.pdf
+*.zip
+*.xlsx
+*.png
+*.jpg
+*.jpeg
