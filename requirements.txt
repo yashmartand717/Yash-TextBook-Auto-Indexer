@@ -1,7 +1,7 @@
 streamlit
 pdfplumber
 pandas
-openai
 openpyxl
-httpx
+openai
 python-dotenv
+httpx
