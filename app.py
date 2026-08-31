@@ -6,13 +6,14 @@ import streamlit as st
 # 🚨 CRITICAL FIX: set_page_config MUST be the very first Streamlit command executed!
 st.set_page_config(page_title="Textbook Index Extractor", layout="wide")
 
-import pdfplumber
+import pymupdf  # Replaced pdfplumber for extreme memory efficiency
 import pandas as pd
 import json
 import io
 import zipfile
 import re
 import time
+import gc       # Used to manually flush server RAM
 from dotenv import load_dotenv
 from openai import OpenAI
 import httpx
@@ -76,11 +77,20 @@ def extract_pdf_streams(uploaded_files):
 
 def extract_text_from_pdf(pdf_file_obj):
     full_text = []
-    with pdfplumber.open(pdf_file_obj) as pdf:
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text()
+    # Read the file into memory safely
+    pdf_bytes = pdf_file_obj.read()
+    
+    # Open with PyMuPDF for memory-efficient parsing
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for i, page in enumerate(doc):
+            text = page.get_text("text")
             if text:
                 full_text.append(f"--- PAGE {i+1} ---\n" + text)
+                
+    # Force the server to delete the file from RAM immediately to prevent 502 crashes
+    del pdf_bytes
+    gc.collect()
+    
     return "\n\n".join(full_text)
 
 def process_text_with_ai(raw_text, filename, max_retries=3):
@@ -90,31 +100,29 @@ def process_text_with_ai(raw_text, filename, max_retries=3):
         return []
         
     prompt = f"""
-    You are an expert curriculum and textbook indexing system. I am providing you with the text of a school textbook chapter.
+    You are an expert curriculum and book indexing system. I am providing you with the text of a book or textbook.
     
     Source File Name: {filename}
     
-    Your task is to comprehensively extract the Chapter Number, Chapter Name, and ALL OF ITS SUBTOPICS.
+    Your task is to extract the structural hierarchy of this text into a JSON array. 
     
     CRITICAL INSTRUCTIONS:
-    1. Extract the exact Chapter Number and Chapter Title. 
-       - **CRUCIAL RULE:** Use the 'Source File Name' provided above as the ultimate source of truth for the Chapter Number (e.g., if the file is named 'ch11_something.pdf', the Chapter Number MUST be "11"). Do not let stray page numbers or typos in the text confuse you.
-    2. Extract all main subtopics and section headings.
-    3. Generate sequential Subtopic IDs starting with the exact Chapter Number (e.g., 11.1, 11.2, 11.3).
-    4. Ignore questions, exercises, 'Let's Check', 'Activities', 'Did You Know' sidebars, and generic page filler.
+    1. Identify the primary structural grouping of the book (e.g., "Unit", "Part", "Section", or "Chapter"). Extract this as "Primary_Grouping".
+    2. Identify the secondary level within that grouping (e.g., "Chapters" inside a "Part", or "Subtopics" inside a "Chapter"). Extract this as "Secondary_Item".
+    3. DO NOT invent numbering systems (like 1.1, 1.2) if they do not exist in the text. Use exactly what is written.
+    4. If the book is flat (just Chapters with no subtopics or parts), put the Chapter Name in "Primary_Grouping" and leave "Secondary_Item" blank.
+    5. Ignore generic filler like 'Let's Check', forewords, or introductions.
     
     Output STRICTLY a valid JSON array of objects. Do not include markdown formatting like ```json.
     Format each item exactly like this:
     [
       {{
-        "Chapter Number": "1",
-        "Chapter Name": "Locating Places and Reading Maps",
-        "Subtopic ID": "1.1",
-        "Subtopic Name": "Shape of Earth"
+        "Primary_Grouping": "What should I eat?",
+        "Secondary_Item": "Eat food."
       }}
     ]
     
-    Textbook Content:
+    Book Content:
     {raw_text}
     """
 
@@ -126,7 +134,8 @@ def process_text_with_ai(raw_text, filename, max_retries=3):
                     {"role": "system", "content": "You are a precise data extraction assistant. Always output clean, raw JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1
+                temperature=0.1,
+                max_tokens=8192 # 🔥 Prevents output truncation for massive books
             )
             
             content = response.choices[0].message.content.strip()
@@ -161,7 +170,7 @@ if uploaded_files and st.button("Extract Data & Generate Master Excel", type="pr
     for idx, pdf_file in enumerate(discovered_pdfs):
         progress_bar.progress((idx + 1) / len(discovered_pdfs), text=f"Processing `{pdf_file.name}`...")
         
-        # Step 1: Text Extraction
+        # Step 1: Text Extraction (Memory Safe)
         raw_text = extract_text_from_pdf(pdf_file)
         
         if len(raw_text.strip()) < 50:
@@ -178,8 +187,8 @@ if uploaded_files and st.button("Extract Data & Generate Master Excel", type="pr
         for item in chapter_data:
             formatted_row = {
                 "SUBJECT": subject_input,
-                "MODULE": item.get("Chapter Name", ""),
-                "CHAPTER": item.get("Subtopic Name", "")
+                "MODULE": item.get("Primary_Grouping", ""),
+                "CHAPTER": item.get("Secondary_Item", "")
             }
             master_data.append(formatted_row)
             
@@ -202,7 +211,7 @@ if uploaded_files and st.button("Extract Data & Generate Master Excel", type="pr
                 max_len = max(df[col].astype(str).map(len).max(), len(str(col))) + 3
                 worksheet.column_dimensions[get_column_letter(i + 1)].width = max_len
 
-        st.success(f"🎉 Complete! Processed {len(df['MODULE'].unique())} chapters successfully.")
+        st.success(f"🎉 Complete! Processed {len(df['MODULE'].unique())} modules successfully.")
         st.dataframe(df)
         
         st.download_button(

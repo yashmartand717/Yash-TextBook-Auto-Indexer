@@ -5,3 +5,4 @@ openpyxl
 openai
 python-dotenv
 httpx
+pymupdf
