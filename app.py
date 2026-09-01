@@ -95,33 +95,26 @@ def process_text_with_ai(raw_text, filename, max_retries=3):
         return []
         
     prompt = f"""
-    You are an expert curriculum and textbook indexing system. I am providing you with the text of a school textbook file.
+    You are an expert curriculum and textbook indexing system. I am providing you with the text of a document.
     
     Source File Name: {filename}
     
-    Your task is to extract the chapter structure into a clean JSON array formatted for an educational database.
+    Your task is to extract the structural hierarchy into a clean JSON array formatted for an educational database.
     
     CRITICAL INSTRUCTIONS:
-    1. Determine the main Chapter/Unit Title of this document. Set this as the "MODULE" for EVERY single item extracted from this file.
-    2. Extract all distinct topics, subtopics, and major conceptual sections covered in the main body of this chapter. Set each one as "CHAPTER".
-    3. NEVER leave "CHAPTER" blank. If a section heading stands on its own without sub-bullets, the heading itself must be the "CHAPTER" value.
-    4. Group closely related micro-items where appropriate so each row represents a distinct, teachable concept.
-    5. STRICTLY IGNORE introductory outlines (like "CHAPTER FOCUS" or "Learning Objectives"), page headers, footers, 'Let's Revise', 'Exercises', 'Did You Know' sidebars, and activity boxes. Do not extract them as topics.
+    1. DYNAMIC HIERARCHY: 
+       - If the text is an ENTIRE BOOK with broad sections (like "Part I", "Unit 1"), set that broad section name as the "MODULE". Set the specific chapters/rules inside it as the "CHAPTER".
+       - If the text is just a SINGLE CHAPTER, set the main Chapter Title as the "MODULE" for all rows, and set its subtopics/section headings as the "CHAPTER".
+    2. NEVER leave "CHAPTER" blank. If a section heading stands on its own without sub-bullets, the heading itself must be the "CHAPTER" value.
+    3. Group closely related micro-items where appropriate so each row represents a distinct, teachable concept.
+    4. STRICTLY IGNORE introductory outlines (like "CHAPTER FOCUS", "Learning Objectives", "Table of Contents"), page headers, footers, 'Let's Revise', 'Exercises', 'Did You Know' sidebars, and activity boxes.
     
     Output STRICTLY a valid JSON array of objects. Do not include markdown formatting like ```json.
-    Format each item exactly like this:
+    Format exactly like this:
     [
       {{
-        "MODULE": "Locating Places and Reading Maps",
-        "CHAPTER": "Shape of the Earth"
-      }},
-      {{
-        "MODULE": "Locating Places and Reading Maps",
-        "CHAPTER": "Globe - Latitudes and Longitudes"
-      }},
-      {{
-        "MODULE": "Locating Places and Reading Maps",
-        "CHAPTER": "Heat Zones of the Earth"
+        "MODULE": "PART I - What should I eat?",
+        "CHAPTER": "Chapter 1 - Eat food."
       }}
     ]
     
@@ -161,6 +154,59 @@ def summarize_index_with_ai(detailed_data, max_retries=3):
     """Groups granular micro-chapters into broader thematic modules."""
     if not openai_client:
         return []
+        
+    prompt = f"""
+    You are an expert curriculum designer. I am providing you with a highly detailed, granular book index (JSON) containing many small chapters or rules.
+    
+    Your task is to group these granular items into a condensed, summarized index.
+    
+    CRITICAL INSTRUCTIONS:
+    1. PRESERVE THE MODULES: Do NOT change or combine different "MODULE" names. You must keep the exact "MODULE" categorization from the input data.
+    2. SUMMARIZE WITHIN MODULES: For each "MODULE", group every 4 to 6 related granular items together into a broader, thematic "CHAPTER".
+    3. Output STRICTLY a valid JSON array of objects. Do not include markdown formatting like ```json.
+    
+    Format exactly like this:
+    [
+      {{
+        "MODULE": "PART I - What should I eat?",
+        "CHAPTER": "Rules 1-6: Defining Real Food vs. Processed Products"
+      }},
+      {{
+        "MODULE": "PART I - What should I eat?",
+        "CHAPTER": "Rules 7-12: Navigating Supermarket Traps and Labels"
+      }}
+    ]
+    
+    Granular Index Data:
+    {json.dumps(detailed_data, indent=2)}
+    """
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a precise data summarization assistant. Always output clean, raw JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=4096
+            )
+            
+            content = response.choices[0].message.content.strip()
+            if content.startswith("```json"):
+                content = content.replace("```json", "", 1)
+            if content.endswith("```"):
+                content = content[:-3]
+                
+            return json.loads(content.strip())
+            
+        except Exception as e:
+            if attempt < max_retries: 
+                time.sleep(3 * attempt)
+            else: 
+                st.error(f"🚨 Summarization API Error: {repr(e)}")
+                return []
         
     prompt = f"""
     You are an expert curriculum designer. I am providing you with a highly detailed, granular book index (JSON) containing many small chapters or rules.
