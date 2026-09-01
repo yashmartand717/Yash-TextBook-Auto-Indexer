@@ -14,6 +14,8 @@ import zipfile
 import re
 import time
 import gc       # Used to manually flush server RAM
+import tempfile
+import shutil
 from dotenv import load_dotenv
 from openai import OpenAI
 import httpx
@@ -43,12 +45,13 @@ else:
     openai_client = None
 
 
-# --- 2. TEXT EXTRACTION & AI FUNCTIONS ---
+# --- 2. TEXT EXTRACTION & DISK-QUEUE PIPELINE ---
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
 
-def extract_pdf_streams(uploaded_files):
-    pdf_streams = []
+def build_disk_queue(uploaded_files, temp_dir):
+    """Extracts and writes files directly to disk to keep RAM usage minimal."""
+    queue = []
     for file in uploaded_files:
         filename = file.name.lower()
         if filename.endswith(".zip"):
@@ -62,61 +65,67 @@ def extract_pdf_streams(uploaded_files):
                     ]
                     valid_pdf_names.sort(key=natural_sort_key)
                     for name in valid_pdf_names:
-                        pdf_bytes = io.BytesIO(zf.read(name))
-                        pdf_bytes.name = name.split("/")[-1]
-                        pdf_streams.append(pdf_bytes)
+                        extracted_path = zf.extract(name, temp_dir)
+                        queue.append(extracted_path)
             except Exception as e:
-                st.error(f"Error reading ZIP file {file.name}: {e}")
+                st.error(f"Error extracting ZIP file {file.name}: {e}")
         elif filename.endswith(".pdf"):
-            pdf_streams.append(file)
+            temp_path = os.path.join(temp_dir, file.name)
+            with open(temp_path, "wb") as f:
+                f.write(file.getbuffer())
+            queue.append(temp_path)
             
-    pdf_streams.sort(key=lambda x: natural_sort_key(x.name))
-    return pdf_streams
+    queue.sort(key=lambda p: natural_sort_key(os.path.basename(p)))
+    return queue
 
-def extract_text_from_pdf(pdf_file_obj):
+def extract_text_from_pdf(pdf_path):
+    """Reads a single PDF directly from disk."""
     full_text = []
-    pdf_bytes = pdf_file_obj.read()
-    
-    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+    with pymupdf.open(pdf_path) as doc:
         for i, page in enumerate(doc):
             text = page.get_text("text")
             if text:
                 full_text.append(f"--- PAGE {i+1} ---\n" + text)
-                
-    del pdf_bytes
-    gc.collect()
     return "\n\n".join(full_text)
 
 
 def process_text_with_ai(raw_text, filename, max_retries=3):
-    """Extracts the granular structural data from the raw text."""
+    """Extracts granular structural data from raw text."""
     if not openai_client:
         return []
         
     prompt = f"""
-    You are an expert curriculum and book indexing system. I am providing you with the text of a book or textbook.
+    You are an expert curriculum and textbook indexing system. I am providing you with the text of a school textbook file.
     
     Source File Name: {filename}
     
-    Your task is to extract the structural hierarchy of this text into a JSON array. 
+    Your task is to extract the chapter structure into a clean JSON array formatted for an educational database.
     
     CRITICAL INSTRUCTIONS:
-    1. Identify the primary structural grouping of the book (e.g., "Unit", "Part", "Section", or "Chapter"). Extract this as "Primary_Grouping".
-    2. Identify the secondary level within that grouping (e.g., "Chapters" inside a "Part", or "Subtopics" inside a "Chapter"). Extract this as "Secondary_Item".
-    3. DO NOT invent numbering systems if they do not exist. Use exactly what is written.
-    4. If the book is flat (just Chapters with no subtopics), put the Chapter Name in "Primary_Grouping" and leave "Secondary_Item" blank.
-    5. Ignore generic filler like forewords or introductions.
+    1. Determine the main Chapter/Unit Title of this document. Set this as the "MODULE" for EVERY single item extracted from this file.
+    2. Extract all distinct topics, subtopics, and major conceptual sections covered in the main body of this chapter. Set each one as "CHAPTER".
+    3. NEVER leave "CHAPTER" blank. If a section heading stands on its own without sub-bullets, the heading itself must be the "CHAPTER" value.
+    4. Group closely related micro-items where appropriate so each row represents a distinct, teachable concept.
+    5. STRICTLY IGNORE introductory outlines (like "CHAPTER FOCUS" or "Learning Objectives"), page headers, footers, 'Let's Revise', 'Exercises', 'Did You Know' sidebars, and activity boxes. Do not extract them as topics.
     
     Output STRICTLY a valid JSON array of objects. Do not include markdown formatting like ```json.
     Format each item exactly like this:
     [
       {{
-        "Primary_Grouping": "PART I - What should I eat?",
-        "Secondary_Item": "Chapter 1 - Eat food."
+        "MODULE": "Locating Places and Reading Maps",
+        "CHAPTER": "Shape of the Earth"
+      }},
+      {{
+        "MODULE": "Locating Places and Reading Maps",
+        "CHAPTER": "Globe - Latitudes and Longitudes"
+      }},
+      {{
+        "MODULE": "Locating Places and Reading Maps",
+        "CHAPTER": "Heat Zones of the Earth"
       }}
     ]
     
-    Book Content:
+    Textbook Content:
     {raw_text}
     """
 
@@ -149,7 +158,7 @@ def process_text_with_ai(raw_text, filename, max_retries=3):
 
 
 def summarize_index_with_ai(detailed_data, max_retries=3):
-    """Takes the granular index and groups micro-chapters into broader thematic modules."""
+    """Groups granular micro-chapters into broader thematic modules."""
     if not openai_client:
         return []
         
@@ -160,7 +169,7 @@ def summarize_index_with_ai(detailed_data, max_retries=3):
     
     CRITICAL INSTRUCTIONS:
     1. Group every 4 to 6 related granular items together into a broader, thematic "Summarized_Chapter".
-    2. Assign these grouped chapters to a "Module" (You can use the existing 'MODULE' names or create broader thematic ones based on the content).
+    2. Assign these grouped chapters to a "Module" (Use existing 'MODULE' names or thematic groupings).
     3. Output STRICTLY a valid JSON array of objects. Do not include markdown formatting like ```json.
     
     Format exactly like this:
@@ -214,45 +223,56 @@ st.markdown("Automated curriculum text parser mapped directly to structured Exce
 subject_input = st.text_input("Subject Name", value="", placeholder="e.g. Maths, Science, Social Studies...")
 uploaded_files = st.file_uploader("Upload Textbook PDFs or ZIP files", type=["pdf", "zip"], accept_multiple_files=True)
 
-# Checkbox for the new feature
-generate_summary = st.checkbox("Also generate a Summarized Index (Groups 5-6 micro-chapters into broader themes)", value=True)
+generate_summary = st.checkbox("Also generate a Summarized Index (Groups 4-6 micro-chapters into broader themes)", value=True)
 
 if uploaded_files and st.button("Extract Data & Generate Master Excel", type="primary"):
-    discovered_pdfs = extract_pdf_streams(uploaded_files)
+    temp_dir = tempfile.mkdtemp()
+    file_queue = build_disk_queue(uploaded_files, temp_dir)
+    
     master_data = []
+    progress_bar = st.progress(0, text="Starting queued text extraction...")
     
-    progress_bar = st.progress(0, text="Starting text extraction...")
-    
-    # 1. GRANULAR EXTRACTION LOOP
-    for idx, pdf_file in enumerate(discovered_pdfs):
-        progress_bar.progress((idx + 1) / len(discovered_pdfs), text=f"Processing `{pdf_file.name}`...")
+    # 1. GRANULAR EXTRACTION QUEUE
+    for idx, filepath in enumerate(file_queue):
+        filename = os.path.basename(filepath)
+        progress_bar.progress((idx + 1) / len(file_queue), text=f"Processing `{filename}` ({idx + 1}/{len(file_queue)})...")
         
-        raw_text = extract_text_from_pdf(pdf_file)
+        raw_text = extract_text_from_pdf(filepath)
+        
+        # Cleanup individual file from disk immediately after reading
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+        gc.collect()
         
         if len(raw_text.strip()) < 50:
-            st.warning(f"⚠️ `{pdf_file.name}` has no selectable text. Skipping.")
+            st.warning(f"⚠️ `{filename}` has no selectable text. Skipping.")
             continue
             
-        chapter_data = process_text_with_ai(raw_text, pdf_file.name)
+        chapter_data = process_text_with_ai(raw_text, filename)
         
         if not chapter_data:
-            st.warning(f"⚠️ No structural data could be extracted from `{pdf_file.name}`. Skipping.")
+            st.warning(f"⚠️ No structural data could be extracted from `{filename}`. Skipping.")
             continue
             
         for item in chapter_data:
             formatted_row = {
                 "SUBJECT": subject_input,
-                "MODULE": item.get("Primary_Grouping", ""),
-                "CHAPTER": item.get("Secondary_Item", "")
+                "MODULE": item.get("MODULE", ""),
+                "CHAPTER": item.get("CHAPTER", "")
             }
             master_data.append(formatted_row)
             
         time.sleep(1.0)
     
+    # Cleanup main temporary folder
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    
     # 2. OPTIONAL SUMMARIZATION PASS
     summary_data = []
     if generate_summary and master_data:
-        progress_bar.progress(1.0, text="Grouping micro-chapters into summaries...")
+        progress_bar.progress(1.0, text="Generating summarized thematic grouping...")
         raw_summary = summarize_index_with_ai(master_data)
         
         for item in raw_summary:
@@ -265,7 +285,7 @@ if uploaded_files and st.button("Extract Data & Generate Master Excel", type="pr
             
     progress_bar.empty()
     
-    # 3. RENDER UI & EXCEL GENERATION
+    # 3. EXCEL WORKBOOK GENERATION & UI DISPLAY
     if not master_data:
         st.error("❌ Critical Failure: Could not extract any data.")
     else:
@@ -273,7 +293,7 @@ if uploaded_files and st.button("Extract Data & Generate Master Excel", type="pr
         excel_buffer = io.BytesIO()
         
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            # Write Sheet 1
+            # Sheet 1: Detailed Index
             df_detailed.to_excel(writer, index=False, sheet_name='Detailed Index')
             worksheet_det = writer.sheets['Detailed Index']
             from openpyxl.utils import get_column_letter
@@ -281,7 +301,7 @@ if uploaded_files and st.button("Extract Data & Generate Master Excel", type="pr
                 max_len = max(df_detailed[col].astype(str).map(len).max(), len(str(col))) + 3
                 worksheet_det.column_dimensions[get_column_letter(i + 1)].width = max_len
                 
-            # Write Sheet 2 if selected
+            # Sheet 2: Summarized Index
             if generate_summary and summary_data:
                 df_summary = pd.DataFrame(summary_data)
                 df_summary.to_excel(writer, index=False, sheet_name='Summarized Index')
@@ -292,7 +312,6 @@ if uploaded_files and st.button("Extract Data & Generate Master Excel", type="pr
 
         st.success(f"🎉 Complete! Processed {len(df_detailed)} total entries.")
         
-        # Display Tabs for easy viewing
         if generate_summary and summary_data:
             tab1, tab2 = st.tabs(["Detailed Index", "Summarized Index"])
             with tab1:
