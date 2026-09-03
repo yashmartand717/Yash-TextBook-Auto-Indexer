@@ -6,3 +6,10 @@ openai
 python-dotenv
 httpx
 pymupdf
+streamlit
+pandas
+pymupdf
+openai
+python-dotenv
+httpx
+openpyxl
