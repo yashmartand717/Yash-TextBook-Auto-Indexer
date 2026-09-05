@@ -98,17 +98,21 @@ def process_text_with_ai(raw_text, filename, max_retries=3):
     Source File Name: {filename}
     Your task is to extract the structural hierarchy into a clean JSON array formatted for an educational database.
     CRITICAL INSTRUCTIONS:
-    1. DYNAMIC HIERARCHY: 
-       - If the text is an ENTIRE BOOK, set the broad section (like "Part I") as the "MODULE", and chapters as "CHAPTER".
-       - If the text is a SINGLE CHAPTER, set the main Chapter Title as the "MODULE", and subtopics as "CHAPTER".
-    2. NEVER leave "CHAPTER" blank. 
-    3. STRICTLY IGNORE introductory outlines (like "CHAPTER FOCUS", "Learning Objectives"), page headers, and activity boxes.
+    INSTRUCTIONS:
+    - If the text is an ENTIRE BOOK, set the broad section (like "Part I") as the "MODULE", and chapters as "CHAPTER".
+    - If the text is a SINGLE CHAPTER, set the true overarching Chapter Title (e.g., "Prime Time" or "Perimeter and Area") as the "MODULE" for ALL entries.
+    - The "MODULE" value MUST be exactly the same for every extracted entry in a single chapter document. DO NOT use subtopics (like "Common Multiples") as the "MODULE".
+    - NEVER leave "CHAPTER" blank. 
+    - STRICTLY IGNORE all activities, games, and pedagogical boxes. DO NOT extract headings like "Idli-Vada Game", "Figure it Out", "Math Talk", "Jump Jackpot", "Let's do", or "Learning Objectives". Only extract major structural subtopics.
+    - STRICTLY IGNORE end-of-chapter sections like "Summary", "Conclusion", "Exercises", "Glossary", or "Notes". Do not include these in the output.
+    - CLEAN TITLES: Do not include any section numbering (e.g., '1.1', '4.2', 'Chapter 1') in the 'CHAPTER' field. Just provide the topic name itself.
+    - CHRONOLOGICAL ORDER: You MUST extract the sections in the exact order they appear in the document from top to bottom. Do not shuffle or skip sections.
     
     Output STRICTLY a valid JSON array of objects. Format exactly like this:
     [
       {{
-        "MODULE": "PART I - What should I eat?",
-        "CHAPTER": "Chapter 1 - Eat food."
+        "MODULE": "What should I eat?",
+        "CHAPTER": "Eat food."
       }}
     ]
     Textbook Content:
@@ -256,10 +260,18 @@ if uploaded_files and st.button("Extract Data & Generate Excel", type="primary")
             extracted_data = process_text_with_ai(raw_text, filename)
             if extracted_data:
                 for item in extracted_data:
+                    raw_chapter = str(item.get("CHAPTER", ""))
+                    # Remove leading numbering like "4.1", "1.1.", "Chapter 1 -" etc.
+                    clean_chapter = re.sub(r'^(?:Chapter\s*\d+\s*[-:]?\s*|[\d\.]+\s*[-:]?\s*)', '', raw_chapter, flags=re.IGNORECASE).strip()
+                    
+                    # Silently skip end-of-chapter meta sections if the AI accidentally extracts them
+                    if clean_chapter.lower() in ["summary", "conclusion", "exercises", "glossary", "notes"]:
+                        continue
+                        
                     master_data.append({
                         "SUBJECT": subject_input,
                         "MODULE": item.get("MODULE", ""),
-                        "CHAPTER": item.get("CHAPTER", "")
+                        "CHAPTER": clean_chapter
                     })
         else:
             extracted_data = process_experiment_with_ai(raw_text, filename)
